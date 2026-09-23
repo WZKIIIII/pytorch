@@ -59,12 +59,11 @@ from torch.testing._internal.common_cuda import (
 from torch.testing._internal.common_device_type import (
     dtypes,
     instantiate_device_type_tests,
-    onlyCPU,
-    onlyCUDA,
 )
 from torch.testing._internal.common_dtype import get_all_fp_dtypes
 from torch.testing._internal.common_utils import (
     freeze_rng_state,
+    HardwareClassification,
     instantiate_parametrized_tests,
     IS_FBCODE,
     IS_WINDOWS,
@@ -160,6 +159,7 @@ class VmapTearDownMixin:
 
 @markDynamoStrictTest
 class TestSliceArgnums(TestCase):
+    hw_classification = HardwareClassification.GENERIC
     def test_invalid_argnum_type(self):
         x = torch.randn(3)
         args = (x,)
@@ -278,6 +278,7 @@ def _get_weights_and_functional_call_with_buffers(net, mechanism):
 
 @markDynamoStrictTest
 class TestGradTransform(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_primitive(self, device):
         x = torch.randn([], device=device)
         result = grad(torch.sin)(x)
@@ -486,8 +487,8 @@ class TestGradTransform(TestCase):
         result, vjp_fn = vjp(f, torch.tensor(1.0))
         vjp_fn(result)
 
-    def test_conj_bit(self):
-        x = torch.tensor(1 + 1j)
+    def test_conj_bit(self, device):
+        x = torch.tensor(1 + 1j, device=device)
 
         def foo(x):
             if x.is_conj():
@@ -742,21 +743,6 @@ class TestGradTransform(TestCase):
         out, vjp_fn = vjp(unrelated, w, x)
         result = vjp_fn((v, v, v))
         expected = (torch.zeros_like(x), torch.ones_like(x))
-        self.assertEqual(result, expected)
-
-    # TODO: https://github.com/pytorch/functorch/issues/12
-    @onlyCPU
-    def test_unrelated_hessian(self, device):
-        N = 5
-        M = 3
-        W = torch.randn(N, M, device=device)
-
-        def f(x):
-            return W @ x
-
-        x = torch.randn(M)
-        result = jacrev(jacrev(f))(x)
-        expected = torch.zeros(N, M, M, device=device)
         self.assertEqual(result, expected)
 
     def test_vjp_pytree_input(self, device):
@@ -1282,6 +1268,7 @@ class TestGradTransform(TestCase):
 
 @markDynamoStrictTest
 class TestAutogradFunction(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     @skipIfTorchDynamo("internal API test")
     def test_unwrap_dead_wrappers(self, device):
         ft = torch._C._functorch
@@ -1535,6 +1522,7 @@ class TestAutogradFunction(TestCase):
 
 @markDynamoStrictTest
 class TestAutogradFunctionVmapAPI(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_no_vmap_staticmethod_and_no_generate_vmap_rule(self, device):
         class NumpyCube(torch.autograd.Function):
             @staticmethod
@@ -1837,6 +1825,7 @@ class TestAutogradFunctionVmapAPI(TestCase):
 
 @markDynamoStrictTest
 class TestVmapOfGrad(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_per_sample_grads_inplace_view(self, device):
         def compute_loss(weight, x, t):
             x = x.mm(weight)
@@ -1984,6 +1973,7 @@ FIXME_jacrev_only = parametrize("jacapi", [subtest(jacrev, name="jacrev")])
 
 @markDynamoStrictTest
 class TestJac(VmapTearDownMixin, TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     @jacrev_and_jacfwd
     def test_simple(self, device, jacapi):
         x = torch.randn(3, device=device)
@@ -2665,6 +2655,7 @@ class TestJac(VmapTearDownMixin, TestCase):
 
 @markDynamoStrictTest
 class TestHessian(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def _test_against_reference(self, f, inputs):
         def foo(inputs):
             return f(*inputs)
@@ -2733,6 +2724,7 @@ class TestHessian(TestCase):
 
 @markDynamoStrictTest
 class TestJvp(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_inplace_on_captures(self, device):
         x = torch.tensor([1.0, 2.0, 3.0], device=device)
         captured = torch.randn(3, device=device)
@@ -2861,12 +2853,12 @@ class TestJvp(TestCase):
         self.assertTrue(isinstance(result, tuple))
         self.assertEqual(result, expected)
 
-    def test_jvp_new_tensor(self):
+    def test_jvp_new_tensor(self, device):
         def f(x):
             y = x.new_tensor(0.5)
             return x + y
 
-        x = torch.rand(10, 10)
+        x = torch.rand(10, 10, device=device)
         tangents = torch.zeros_like(x)
         actual = jvp(f, (x,), (tangents,))
         expected = (f(x), torch.zeros_like(x))
@@ -3087,6 +3079,7 @@ class TestJvp(TestCase):
 
 @markDynamoStrictTest
 class TestLinearize(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     @dtypes(torch.float)
     def test_linearize_basic(self, device, dtype):
         x_p = make_tensor((3, 1), device=device, dtype=dtype)
@@ -3194,43 +3187,11 @@ class TestLinearize(TestCase):
         self.assertEqual(actual_output, expected_output)
         self.assertEqual(actual_jvp, expected_jvp)
 
-    @onlyCUDA
-    def test_linearize_errors(self):
-        dtype = torch.float
-        device = torch.device("cpu")
-        x_p = make_tensor((3, 1), device=device, dtype=dtype)
-        x_t = make_tensor((3, 1), device=device, dtype=dtype)
-
-        def fn(x):
-            return x.sin()
-
-        _, jvp_fn = linearize(fn, x_p)
-
-        with self.assertRaisesRegex(
-            RuntimeError, "to have the same argspec as the primals"
-        ):
-            jvp_fn((x_t, x_t))
-
-        with self.assertRaisesRegex(
-            RuntimeError, "in flattened pytree doesn't match the shape"
-        ):
-            jvp_fn(x_t.unsqueeze(0))
-
-        with self.assertRaisesRegex(
-            RuntimeError, "in flattened pytree doesn't match the dtype"
-        ):
-            jvp_fn(x_t.to(torch.double))
-
-        with self.assertRaisesRegex(
-            RuntimeError, "in flattened pytree doesn't match the device"
-        ):
-            jvp_fn(x_t.to(torch.device("cuda")))
-
-
-# The tests here follow the cases in [Forward Grad View/inplace]
+    # The tests here follow the cases in [Forward Grad View/inplace]
 # https://github.com/pytorch/pytorch/blob/master/torch/csrc/autograd/autograd_meta.cpp#L18-L43
 @markDynamoStrictTest
 class TestVmapJvpInplaceView(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     # Case 1 in [Forward Grad View/inplace]
     def test_all_dual_no_view(self, device):
         B = 2
@@ -3391,6 +3352,7 @@ class TestVmapJvpInplaceView(TestCase):
 # Use for testing miscellaneous helper functions
 @markDynamoStrictTest
 class TestHelpers(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_CtxWithSavedTensors_error_if_name_collision(self, device):
         x = torch.randn([], device=device, requires_grad=True)
         y = torch.randn([], device=device, requires_grad=True)
@@ -3545,14 +3507,14 @@ class TestHelpers(TestCase):
         out = A.apply(x, y)
         out.backward()
 
-    def test_debug_unwrap(self):
+    def test_debug_unwrap(self, device):
         stuff = []
 
         def f(x):
             stuff.append(torch.func.debug_unwrap(x))
             return x.sin()
 
-        x = torch.randn(2, 3)
+        x = torch.randn(2, 3, device=device)
         _ = vmap(vmap(f))(x)
         self.assertEqual(stuff[0], x)
         self.assertTrue(stuff[0] is x)
@@ -3599,6 +3561,7 @@ class TestHelpers(TestCase):
 
 @markDynamoStrictTest
 class TestComposability(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_deprecation_vmap(self, device):
         # functorch version of the API is deprecated
         with self.assertWarnsRegex(FutureWarning, "Please use `torch.vmap`"):
@@ -3743,19 +3706,6 @@ class TestComposability(TestCase):
         fx_f = make_fx(vjp_fn)(cotangent, True, True)
         new_cotangent = torch.randn(())
         self.assertEqual(fx_f(new_cotangent, True, True), vjp_fn(new_cotangent))
-
-    # FIXME: test fails in Windows
-    @unittest.skipIf(IS_WINDOWS, "fails in Windows; needs investigation")
-    @unittest.skipIf(IS_FBCODE, "can't subprocess in fbcode")
-    # it is redundant to run this test twice on a machine that has GPUs
-    @onlyCPU
-    def test_no_warning_on_import_functorch(self, device):
-        out = subprocess.check_output(
-            [sys.executable, "-W", "always", "-c", "import functorch"],
-            stderr=subprocess.STDOUT,
-            cwd=os.path.dirname(os.path.realpath(__file__)),
-        ).decode("utf-8")
-        self.assertEqual(out, "")
 
     def test_requires_grad_inside_transform(self, device):
         def f(x):
@@ -3988,6 +3938,7 @@ class TestComposability(TestCase):
 
 @markDynamoStrictTest
 class TestMakeFunctional(TestCase):
+    hw_classification = HardwareClassification.GENERIC
     @parametrize("disable_autograd_tracking", [True, False])
     def test_disable_autograd_tracking(self, disable_autograd_tracking):
         class Foo(nn.Module):
@@ -4347,6 +4298,7 @@ class TestMakeFunctional(TestCase):
 
 @markDynamoStrictTest
 class TestExamplesCorrectness(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def _update_params(self, params, grads, alpha, mechanism):
         if mechanism == "make_functional":
             return [(params[i] - alpha * grads[i]) for i in range(len(params))]
@@ -4915,6 +4867,7 @@ def normalize_devices(fx_g):
 
 @markDynamoStrictTest
 class TestFunctionalize(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def _check_functionalize_correctness(self, f, inpt, *, skip_vmap=False):
         inpt1 = inpt.clone()
         inpt2 = inpt.clone()
@@ -5365,6 +5318,7 @@ sum_pyop = construct_sum_pyop()
 
 @markDynamoStrictTest
 class TestHigherOrderOperatorInteraction(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     def test_basic_sum(self, device):
         x = torch.randn(2, 3, 4, device=device)
         result = sum_pyop(x, 1)
@@ -5432,10 +5386,13 @@ class TestHigherOrderOperatorInteraction(TestCase):
         grad_fn = grad(my_fn)
         self.assertEqual(grad_fn.__name__, "my_fn")
 
-    def test_functional_call_multiple_dicts(self):
-        mod = nn.Linear(1, 1)
-        x = torch.randn((1, 1))
-        params = ({"weight": torch.zeros(1, 1)}, {"bias": torch.ones(1)})
+    def test_functional_call_multiple_dicts(self, device):
+        mod = nn.Linear(1, 1).to(device)
+        x = torch.randn((1, 1), device=device)
+        params = (
+            {"weight": torch.zeros(1, 1, device=device)},
+            {"bias": torch.ones(1, device=device)},
+        )
         functional_call(mod, params, x)
 
 
@@ -5451,6 +5408,7 @@ def traceable(f):
 
 @markDynamoStrictTest
 class TestCompileTransforms(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
     # torch.compile is not supported on Windows CUDA.
     # Triton only supports GPU with SM70 or later.
     @expectedFailureIf((IS_WINDOWS and TEST_CUDA) or (TEST_CUDA and not SM70OrLater))
@@ -5621,6 +5579,8 @@ class TestCompileTransforms(TestCase):
 class TestGradTrackingTensorToList(TestCase):
     """Tests for tolist() method with GradTrackingTensor (functorch tensors)."""
 
+    hw_classification = HardwareClassification.GENERIC
+
     def test_tolist_with_grad(self):
         """Test to see if tolist works inside grad transformation."""
 
@@ -5713,76 +5673,149 @@ class TestGradTrackingTensorToList(TestCase):
         self.assertEqual(result, [2.0 + 4.0j, 6.0 + 8.0j])
 
 
-only_for = ("cpu", "cuda")
+@markDynamoStrictTest
+class TestGradTransformCPUOnly(TestCase):
+    hw_classification = HardwareClassification.CPU
+
+    # TODO: https://github.com/pytorch/functorch/issues/12
+    def test_unrelated_hessian(self, device):
+        N = 5
+        M = 3
+        W = torch.randn(N, M, device=device)
+
+        def f(x):
+            return W @ x
+
+        x = torch.randn(M)
+        result = jacrev(jacrev(f))(x)
+        expected = torch.zeros(N, M, M, device=device)
+        self.assertEqual(result, expected)
+
+
+@markDynamoStrictTest
+class TestComposabilityCPUOnly(TestCase):
+    hw_classification = HardwareClassification.CPU
+
+    # FIXME: test fails in Windows
+    @unittest.skipIf(IS_WINDOWS, "fails in Windows; needs investigation")
+    @unittest.skipIf(IS_FBCODE, "can't subprocess in fbcode")
+    # it is redundant to run this test twice on a machine that has GPUs
+    def test_no_warning_on_import_functorch(self, device):
+        out = subprocess.check_output(
+            [sys.executable, "-W", "always", "-c", "import functorch"],
+            stderr=subprocess.STDOUT,
+            cwd=os.path.dirname(os.path.realpath(__file__)),
+        ).decode("utf-8")
+        self.assertEqual(out, "")
+
+
+@markDynamoStrictTest
+class TestLinearizeCUDA(TestCase):
+    hw_classification = HardwareClassification.CUDA
+
+    def test_linearize_errors(self):
+        dtype = torch.float
+        device = torch.device("cpu")
+        x_p = make_tensor((3, 1), device=device, dtype=dtype)
+        x_t = make_tensor((3, 1), device=device, dtype=dtype)
+
+        def fn(x):
+            return x.sin()
+
+        _, jvp_fn = linearize(fn, x_p)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "to have the same argspec as the primals"
+        ):
+            jvp_fn((x_t, x_t))
+
+        with self.assertRaisesRegex(
+            RuntimeError, "in flattened pytree doesn't match the shape"
+        ):
+            jvp_fn(x_t.unsqueeze(0))
+
+        with self.assertRaisesRegex(
+            RuntimeError, "in flattened pytree doesn't match the dtype"
+        ):
+            jvp_fn(x_t.to(torch.double))
+
+        with self.assertRaisesRegex(
+            RuntimeError, "in flattened pytree doesn't match the device"
+        ):
+            jvp_fn(x_t.to(torch.device("cuda")))
+
+
+except_for = ("privateuse1",)
+
 instantiate_device_type_tests(
     TestGradTransform,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestVmapOfGrad,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestJac,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestJvp,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestLinearize,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestVmapJvpInplaceView,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestHessian,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestComposability,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestExamplesCorrectness,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestHigherOrderOperatorInteraction,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestFunctionalize,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestAutogradFunction,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestAutogradFunctionVmapAPI,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_device_type_tests(
     TestHelpers,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
 instantiate_parametrized_tests(
     TestMakeFunctional,
@@ -5790,11 +5823,12 @@ instantiate_parametrized_tests(
 instantiate_device_type_tests(
     TestCompileTransforms,
     globals(),
-    only_for=only_for,
+    except_for=except_for,
 )
-instantiate_device_type_tests(
-    TestGradTrackingTensorToList, globals(), only_for=only_for
-)
+
+instantiate_device_type_tests(TestGradTransformCPUOnly, globals(), only_for="cpu")
+instantiate_device_type_tests(TestComposabilityCPUOnly, globals(), only_for="cpu")
+instantiate_device_type_tests(TestLinearizeCUDA, globals(), only_for="cuda")
 
 if __name__ == "__main__":
     run_tests()
